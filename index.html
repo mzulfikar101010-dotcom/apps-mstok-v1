@@ -383,6 +383,10 @@
     .section-title h2{font-size:17px;}
     .field-row{flex-wrap:wrap;}
   }
+  .check-row{display:flex;align-items:center;gap:12px;padding:12px 14px;margin:0 0 10px;background:#FFFDF8;
+    border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;color:var(--ink);}
+  .check-row input{width:24px;height:24px;min-height:0;flex:0 0 24px;accent-color:var(--teal);margin:0;}
+  .check-row .muted{font-weight:400;font-size:12.5px;}
 </style>
 </head>
 <body>
@@ -601,7 +605,7 @@ function render(){
 let paketFormState = null; // {id|null, name, sellPrice, items:[{productId,qty}]}
 
 /* ---------- HITUNG MODAL & UNTUNG ---------- */
-const DEFAULT_SETTINGS = { AdminPersen:17, Pemrosesan:1250, BLL:2320, Operasional:5000 };
+const DEFAULT_SETTINGS = { AdminPersen:17, Pemrosesan:1250, BLL:2320, Operasional:5000, PreOrderPersen:3 };
 function getSettings(){ return Object.assign({}, DEFAULT_SETTINGS, state.settings||{}); }
 
 function fmtRp(n){
@@ -625,29 +629,31 @@ function calcModal(items){
 }
 
 // Untung bersih = harga jual - modal - admin(% dari harga jual) - pemrosesan - BLL - operasional
-function calcProfit(modal, sell){
+// Kalau paket pre order: dikurangi lagi potongan PreOrderPersen% dari harga jual.
+function calcProfit(modal, sell, preOrder){
   const st = getSettings();
   const admin = Math.round(sell * st.AdminPersen / 100);
+  const po = preOrder ? Math.round(sell * st.PreOrderPersen / 100) : 0;
   const fixed = st.Pemrosesan + st.BLL + st.Operasional;
-  const net = sell - modal - admin - fixed;
-  return {admin, proses: st.Pemrosesan, bll: st.BLL, ops: st.Operasional, fixed, net, adminPct: st.AdminPersen};
+  const net = sell - modal - admin - po - fixed;
+  return {admin, po, proses: st.Pemrosesan, bll: st.BLL, ops: st.Operasional, fixed, net, adminPct: st.AdminPersen, poPct: st.PreOrderPersen};
 }
 
 // Harga jual paling kecil yang sudah tidak rugi (untung >= 0)
-function calcBreakEven(modal){
+function calcBreakEven(modal, preOrder){
   const st = getSettings();
   const fixed = st.Pemrosesan + st.BLL + st.Operasional;
-  const rate = st.AdminPersen/100;
+  const rate = (st.AdminPersen + (preOrder ? st.PreOrderPersen : 0))/100;
   if(rate>=1) return 0;
   let sell = Math.max(0, Math.floor((modal + fixed) / (1 - rate)) - 2);
-  while(calcProfit(modal, sell).net < 0 && sell < 100000000) sell++;
+  while(calcProfit(modal, sell, preOrder).net < 0 && sell < 100000000) sell++;
   return sell;
 }
 
 function renderPaketCalcSummary(f){
   const {modal, missing} = calcModal(f.items);
   const sell = Number(f.sellPrice)||0;
-  const pr = calcProfit(modal, sell);
+  const pr = calcProfit(modal, sell, f.preOrder);
   const hasSell = sell>0;
   const cls = !hasSell ? 'neutral' : (pr.net<0 ? 'loss' : 'gain');
   return `<div class="calc-top">
@@ -661,14 +667,15 @@ function renderPaketCalcSummary(f){
 function renderPaketCalcDetail(f){
   const {modal} = calcModal(f.items);
   const sell = Number(f.sellPrice)||0;
-  const pr = calcProfit(modal, sell);
-  const be = calcBreakEven(modal);
+  const pr = calcProfit(modal, sell, f.preOrder);
+  const be = calcBreakEven(modal, f.preOrder);
   if(modal<=0 && sell<=0) return `<div class="small muted">Pilih produk dan isi harga jual, rincian untung akan muncul di sini.</div>`;
   const margin = sell>0 ? (pr.net/sell*100) : 0;
   return `<table class="calc-table">
       <tr><td>Harga jual</td><td>${fmtRp(sell)}</td></tr>
       <tr><td>Modal barang</td><td class="neg">− ${fmtRp(modal)}</td></tr>
       <tr><td>Admin TikTok (${pr.adminPct}%)</td><td class="neg">− ${fmtRp(pr.admin)}</td></tr>
+      ${f.preOrder?`<tr><td>Potongan pre order (${pr.poPct}%)</td><td class="neg">− ${fmtRp(pr.po)}</td></tr>`:''}
       <tr><td>Biaya pemrosesan</td><td class="neg">− ${fmtRp(pr.proses)}</td></tr>
       <tr><td>Biaya BLL</td><td class="neg">− ${fmtRp(pr.bll)}</td></tr>
       <tr><td>Biaya operasional</td><td class="neg">− ${fmtRp(pr.ops)}</td></tr>
@@ -687,13 +694,13 @@ function updatePaketCalc(){
 
 function startNewPaket(){
   formOpen = true;
-  paketFormState = { id:null, name:'', sellPrice:0, items:[{productId:'', qty:1}] };
+  paketFormState = { id:null, name:'', sellPrice:0, preOrder:false, items:[{productId:'', qty:1}] };
   render();
 }
 function startEditPaket(id){
   const pkg = getPackage(id);
   formOpen = true;
-  paketFormState = { id: pkg.id, name: pkg.name, sellPrice: Number(pkg.sellPrice)||0, items: pkg.items.map(i=>({...i})) };
+  paketFormState = { id: pkg.id, name: pkg.name, sellPrice: Number(pkg.sellPrice)||0, preOrder: !!pkg.preOrder, items: pkg.items.map(i=>({...i})) };
   render();
 }
 function cancelPaketForm(){
@@ -710,7 +717,7 @@ function viewPaket(){
   html += `</div>`;
   if(!paketFormState){
     const st = getSettings();
-    html += `<div class="small muted" style="margin:-4px 0 10px;">Potongan per pesanan: admin ${st.AdminPersen}% · proses ${fmtRp(st.Pemrosesan)} · BLL ${fmtRp(st.BLL)} · operasional ${fmtRp(st.Operasional)}. Ubah di tab <b>Pengaturan</b> pada spreadsheet.</div>`;
+    html += `<div class="small muted" style="margin:-4px 0 10px;">Potongan per pesanan: admin ${st.AdminPersen}% · proses ${fmtRp(st.Pemrosesan)} · BLL ${fmtRp(st.BLL)} · operasional ${fmtRp(st.Operasional)} · pre order +${st.PreOrderPersen}%. Ubah di tab <b>Pengaturan</b> pada spreadsheet.</div>`;
   }
 
   if(paketFormState){
@@ -729,6 +736,10 @@ function viewPaket(){
         <label>Harga jual di TikTok (Rp)</label>
         <input type="number" inputmode="numeric" min="0" step="500" id="pfSellPrice" placeholder="Contoh: 85000" value="${f.sellPrice?f.sellPrice:''}" class="price-input">
       </div>
+      <label class="check-row">
+        <input type="checkbox" id="pfPreOrder" ${f.preOrder?'checked':''}>
+        <span>Paket Pre Order <span class="muted">(potongan tambahan ${getSettings().PreOrderPersen}% dari harga jual)</span></span>
+      </label>
       <div class="calc" id="pfCalc">
         <div id="pfCalcSummary">${renderPaketCalcSummary(f)}</div>
       </div>
@@ -758,7 +769,7 @@ function viewPaket(){
       const {max} = maxSellable(pkg);
       html += `<div class="card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-          <span class="tag">${escHtml(pkg.name)}</span>
+          <span class="tag">${escHtml(pkg.name)}</span>${pkg.preOrder?' <span class="badge badge-warn" style="margin-left:6px;">Pre Order</span>':''}
           <div style="display:flex;gap:6px;">
             <button class="btn btn-ghost btn-sm" data-edit-paket="${pkg.id}">✏️</button>
             <button class="btn btn-danger btn-sm" data-del-paket="${pkg.id}">🗑️</button>
@@ -781,7 +792,7 @@ function viewPaket(){
 function renderPaketCardMoney(pkg){
   const {modal, missing} = calcModal(pkg.items);
   const sell = Number(pkg.sellPrice)||0;
-  const pr = calcProfit(modal, sell);
+  const pr = calcProfit(modal, sell, pkg.preOrder);
   const cls = !sell ? 'neutral' : (pr.net<0 ? 'loss' : 'gain');
   return `<div class="money-grid">
       <div><div class="calc-lbl">Modal</div><div class="money-val">${fmtRp(modal)}</div></div>
@@ -890,7 +901,7 @@ function viewLaporan(){
       const cls = max<=0 ? 'zero' : (max<=3 ? 'low' : 'ok');
       html += `<div class="card max-card">
         <div>
-          <span class="tag">${escHtml(pkg.name)}</span>
+          <span class="tag">${escHtml(pkg.name)}</span>${pkg.preOrder?' <span class="badge badge-warn" style="margin-left:6px;">Pre Order</span>':''}
           <div class="small muted" style="margin-top:6px;">
             ${max<=0 ? `Stok habis di: <b>${escHtml(bottleneck||'-')}</b>` : `Pembatas: <b>${escHtml(bottleneck||'-')}</b>`}
           </div>
@@ -1400,6 +1411,11 @@ function bindViewEvents(){
       if(paketFormState){ paketFormState.items[idx].qty = parseFloat(e.target.value)||0; updatePaketCalc(); }
     });
   });
+  const pfPreOrder = document.getElementById('pfPreOrder');
+  if(pfPreOrder) pfPreOrder.addEventListener('change', e=>{
+    paketFormState.preOrder = e.target.checked;
+    updatePaketCalc();
+  });
   const pfSellPrice = document.getElementById('pfSellPrice');
   if(pfSellPrice) pfSellPrice.addEventListener('input', e=>{
     paketFormState.sellPrice = parseFloat(e.target.value)||0;
@@ -1468,9 +1484,10 @@ function bindViewEvents(){
       pkg.name = trimmedName;
       pkg.items = items;
       pkg.sellPrice = Number(f.sellPrice)||0;
+      pkg.preOrder = !!f.preOrder;
     } else {
       if(state.packages.some(p=>p.name.toLowerCase()===trimmedName.toLowerCase())){ showToast('Nama paket sudah ada','error'); return; }
-      state.packages.push({id:trimmedName, name:trimmedName, items, sellPrice: Number(f.sellPrice)||0});
+      state.packages.push({id:trimmedName, name:trimmedName, items, sellPrice: Number(f.sellPrice)||0, preOrder: !!f.preOrder});
     }
     showToast('Paket disimpan', 'success');
     formOpen = false;
