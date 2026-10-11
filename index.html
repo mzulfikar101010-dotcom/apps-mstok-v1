@@ -394,6 +394,14 @@
   .item-sub{font-family:'JetBrains Mono',monospace;font-weight:700;color:var(--teal);}
   .combo-item{display:block;}
   .combo-item .stock-hint{display:block;float:none;margin-top:2px;font-size:12px;}
+  /* satu baris = satu biji: kotak harga menggantikan kotak qty */
+  .price-pill{flex:0 0 92px;min-height:46px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:#F6EFDD;border-radius:9px;padding:2px 4px;text-align:center;line-height:1.15;}
+  .pp-val{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;color:var(--teal);}
+  .pp-sub{font-size:10px;color:var(--muted);}
+  .pp-warn{font-size:11.5px;font-weight:700;color:var(--warn);}
+  .pp-empty{color:var(--muted);}
+  .item-row .combo-wrap input{font-size:15px;}
 </style>
 </head>
 <body>
@@ -427,7 +435,7 @@
    DATA LAYER
 ========================================================= */
 // >>> GANTI URL DI BAWAH INI dengan URL Web App hasil deploy Google Apps Script kamu <<<
-const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbwovANKJUp4Zx118rgFUH6Zgy34vBlMBeyyV370YoHE_62SsnvnzcGV5g1YA5yQxBDz/exec';
+const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbygM37OW_iysErudHBwnPF8HRTDIsBM9IRC1mSBzKY3uj2-_qaIC86ljjqclywtEQfN/exec';
 
 let state = { products: [], packages: [], movements: [], resi: [], settings: {} };
 let uiBusy = false;
@@ -696,8 +704,8 @@ function updatePaketCalc(){
   const a = document.getElementById('pfCalcSummary');
   const b = document.getElementById('pfCalcDetail');
   paketFormState.items.forEach((it,idx)=>{
-    const el = document.getElementById('pfItemInfo'+idx);
-    if(el) el.innerHTML = paketItemInfoHTML(it);
+    const el = document.getElementById('pfItemPrice'+idx);
+    if(el) el.innerHTML = paketItemPriceHTML(it);
   });
   if(a) a.innerHTML = renderPaketCalcSummary(paketFormState);
   if(b) b.innerHTML = renderPaketCalcDetail(paketFormState);
@@ -708,10 +716,20 @@ function startNewPaket(){
   paketFormState = { id:null, name:'', sellPrice:0, preOrder:false, items:[{productId:'', qty:1}] };
   render();
 }
+// Paket lama yang qty-nya lebih dari 1 dibuka sebagai beberapa baris (1 baris = 1 biji)
+function expandPaketItems(items){
+  const out = [];
+  for(const it of items){
+    const n = Math.max(1, Math.round(Number(it.qty)||1));
+    for(let k=0;k<n;k++) out.push({productId: it.productId, qty:1});
+  }
+  return out.length ? out : [{productId:'', qty:1}];
+}
+
 function startEditPaket(id){
   const pkg = getPackage(id);
   formOpen = true;
-  paketFormState = { id: pkg.id, name: pkg.name, sellPrice: Number(pkg.sellPrice)||0, preOrder: !!pkg.preOrder, items: pkg.items.map(i=>({...i})) };
+  paketFormState = { id: pkg.id, name: pkg.name, sellPrice: Number(pkg.sellPrice)||0, preOrder: !!pkg.preOrder, items: expandPaketItems(pkg.items) };
   render();
 }
 function cancelPaketForm(){
@@ -787,9 +805,9 @@ function viewPaket(){
           </div>
         </div>
         <div class="small muted" style="margin-top:8px;">
-          ${pkg.items.map(it=>{
+          ${groupPaketItems(pkg.items).map(it=>{
             const p = getProduct(it.productId);
-            return `${escHtml(p?p.name:'(dihapus)')} <span class="mono">×${it.qty}</span>`;
+            return `${escHtml(p?p.name:'(dihapus)')}${it.qty>1?` <span class="mono">×${it.qty}</span>`:''}`;
           }).join(' &nbsp;·&nbsp; ')}
         </div>
         <div class="small" style="margin-top:6px;">Bisa dijual hari ini: <b class="mono">${max}</b> paket</div>
@@ -798,6 +816,15 @@ function viewPaket(){
     }
   }
   return html;
+}
+
+function groupPaketItems(items){
+  const map = new Map();
+  for(const it of items){
+    const k = it.productId;
+    map.set(k, (map.get(k)||0) + (Number(it.qty)||0));
+  }
+  return [...map].map(([productId,qty])=>({productId,qty}));
 }
 
 function renderPaketCardMoney(pkg){
@@ -813,30 +840,26 @@ function renderPaketCardMoney(pkg){
     ${missing.length?`<div class="calc-warn">⚠️ Harga belum diisi: ${missing.map(escHtml).join(', ')}</div>`:''}`;
 }
 
-// Baris info di bawah tiap produk: harga per biji x qty = subtotal
-function paketItemInfoHTML(it){
+// Kotak harga per biji di sebelah nama produk (menggantikan kotak qty)
+function paketItemPriceHTML(it){
   const typed = String(it.productId||'').trim();
-  if(!typed) return '<span class="muted">Pilih produk untuk melihat harganya</span>';
+  if(!typed) return '<span class="pp-empty">—</span>';
   const p = getProduct(it.productId);
-  if(!p) return '<span class="warn-text">Produk tidak ditemukan — pilih dari daftar saran</span>';
+  if(!p) return '<span class="pp-warn">tidak ada</span>';
   const price = Number(p.price)||0;
-  const qty = Number(it.qty)||0;
-  if(price<=0) return '<span class="warn-text">⚠️ Harga belum diisi — isi di halaman Stok</span>';
-  return `<span><b>${fmtRp(price)}</b> /biji × ${qty}</span><span class="item-sub">${fmtRp(price*qty)}</span>`;
+  if(price<=0) return '<span class="pp-warn">harga kosong</span>';
+  return `<span class="pp-val">${fmtRp(price)}</span><span class="pp-sub">per biji</span>`;
 }
 
 function renderPaketItemRow(it, idx){
-  return `<div class="item-card">
-  <div class="item-row" data-idx="${idx}">
-    <div class="combo-wrap" style="flex:2;">
+  return `<div class="item-row" data-idx="${idx}">
+    <div class="combo-wrap" style="flex:1 1 auto;min-width:0;">
       <input type="text" data-field="productId" data-idx="${idx}" data-combo="pfProd${idx}" autocomplete="off"
         placeholder="Ketik nama produk…" value="${escAttr(it.productId||'')}">
       <div class="combo-dropdown" id="pfProdDropdown${idx}"></div>
     </div>
-    <input type="number" inputmode="numeric" min="1" step="1" class="qty-input" data-field="qty" data-idx="${idx}" value="${it.qty}" placeholder="Qty">
+    <div class="price-pill" id="pfItemPrice${idx}">${paketItemPriceHTML(it)}</div>
     <button class="icon-btn" data-remove-item="${idx}" type="button">✕</button>
-  </div>
-  <div class="item-info" id="pfItemInfo${idx}">${paketItemInfoHTML(it)}</div>
   </div>`;
 }
 
