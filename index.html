@@ -354,6 +354,8 @@
   .row-main{flex:1;min-width:0;}
   .row-name{font-weight:600;font-size:14.5px;word-break:break-word;}
   .row-sub{font-size:12.5px;margin-top:3px;color:var(--ink);}
+  .est-line{font-family:'Inter',sans-serif;font-weight:600;font-size:11px;color:#A8A196;opacity:.9;white-space:nowrap;margin-top:2px;}
+  .est-line.neg{color:#C98A84;}
   .row-stock{font-size:18px;min-width:38px;text-align:right;}
   .row-actions{display:flex;gap:4px;}
 
@@ -435,7 +437,7 @@
    DATA LAYER
 ========================================================= */
 // >>> GANTI URL DI BAWAH INI dengan URL Web App hasil deploy Google Apps Script kamu <<<
-const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbxRImISdl_vRjR350FopNFZQ7Y9gc3EyTW2Qsb6PdygyRNSAgGhgKhVAzMoL65tRqgI/exec';
+const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbwovANKJUp4Zx118rgFUH6Zgy34vBlMBeyyV370YoHE_62SsnvnzcGV5g1YA5yQxBDz/exec';
 
 let state = { products: [], packages: [], movements: [], resi: [], settings: {} };
 let uiBusy = false;
@@ -454,9 +456,12 @@ async function loadState(silent){
     return;
   }
   try{
+    await saveChain; // tunggu penyimpanan yang sedang jalan, supaya tidak menimpa data baru dengan data lama
+    const seqBefore = saveSeq;
     const res = await fetch(SHEET_API_URL, { method:'GET' });
     const text = await res.text();
     const data = parseJsonOrExplain(text);
+    if(saveSeq !== seqBefore || savePending > 0) return; // ada perubahan baru saat memuat: data dari server sudah usang, abaikan
     state = {
       products: data.products || [],
       packages: data.packages || [],
@@ -479,7 +484,16 @@ function parseJsonOrExplain(text){
   }
 }
 
-async function saveState(){
+// Penyimpanan diantrekan satu per satu (tidak boleh dua simpan bersamaan)
+let saveChain = Promise.resolve();
+let saveSeq = 0, savePending = 0;
+function saveState(){
+  saveSeq++; savePending++;
+  const p = saveChain.then(doSaveState, doSaveState).finally(()=>{ savePending--; });
+  saveChain = p.catch(()=>{});
+  return p;
+}
+async function doSaveState(){
   if(!sheetUrlConfigured()){
     showToast('URL Google Sheets belum diatur. Edit SHEET_API_URL di kode HTML.', 'error');
     return false;
@@ -516,14 +530,32 @@ function sortedProducts(){
 function getProduct(id){ return state.products.find(p=>p.id===id); }
 function getPackage(id){ return state.packages.find(p=>p.id===id); }
 
-function maxSellable(pkg){
+// Stok yang "dipesan" oleh resi yang sudah diupload tapi belum di-scan packing.
+// Dihitung langsung dari tab Resi (status "Belum Packing"), jadi otomatis hilang saat di-scan
+// (saat itu stok real yang berkurang) dan otomatis menyesuaikan kalau status diubah manual.
+function reservedMap(){
+  const map = {};
+  for(const r of (state.resi||[])){
+    if(r.status !== 'Belum Packing' || r.matchType !== 'paket') continue;
+    const pkg = getPackage(r.matchId) || getPackage(r.name);
+    if(!pkg) continue;
+    for(const it of pkg.items){
+      map[it.productId] = (map[it.productId]||0) + (it.qty||1) * (Number(r.qty)||1);
+    }
+  }
+  return map;
+}
+function estStockOf(p, rm){ return p.stock - ((rm||reservedMap())[p.id]||0); }
+
+function maxSellable(pkg, useEst){
   if(!pkg.items || !pkg.items.length) return {max:0, bottleneck:null};
+  const rm = useEst ? reservedMap() : null;
   let max = Infinity, bottleneck = null;
   for(const it of pkg.items){
     const p = getProduct(it.productId);
-    const stock = p ? p.stock : 0;
+    const stock = p ? (useEst ? estStockOf(p, rm) : p.stock) : 0;
     const qty = it.qty || 1;
-    const possible = Math.floor(stock / qty);
+    const possible = Math.max(0, Math.floor(stock / qty));
     if(possible < max){ max = possible; bottleneck = p ? p.name : '(produk dihapus)'; }
   }
   if(max === Infinity) max = 0;
@@ -871,6 +903,7 @@ let editingStockId = null;
 let newProductForm = false;
 
 function viewStok(){
+  const rm_ = reservedMap();
   let html = `<div class="section-title"><h2>Stok Produk</h2>
     <button class="btn btn-primary btn-sm" id="btnNewProduct">+ Produk</button></div>`;
 
@@ -926,7 +959,7 @@ function viewStok(){
           <div class="row-name">${escHtml(p.name)}</div>
           <div class="row-sub">${badge} <span class="muted">kritis ${crit}</span> · ${price>0?`<span>${fmtRp(price)}/biji</span>`:'<span class="warn-text">harga belum diisi</span>'}</div>
         </div>
-        <div class="row-stock stock-num">${p.stock}</div>
+        <div class="row-stock stock-num">${p.stock}${(()=>{ const rv = rm_[p.id]||0; if(!rv) return ''; const e = p.stock - rv; return `<div class="est-line${e<=0?' neg':''}">Estimasi : ${e}</div>`; })()}</div>
         <div class="row-actions">
           <button class="btn btn-ghost btn-sm" data-edit-stock="${escAttr(p.id)}" title="Ubah stok, kritis & harga">✏️</button>
           <button class="btn btn-danger btn-sm" data-del-product="${escAttr(p.id)}" title="Hapus produk">🗑️</button>
@@ -948,6 +981,7 @@ function viewLaporan(){
   } else {
     for(const pkg of state.packages){
       const {max, bottleneck} = maxSellable(pkg);
+      const est = maxSellable(pkg, true);
       const cls = max<=0 ? 'zero' : (max<=3 ? 'low' : 'ok');
       html += `<div class="card max-card">
         <div>
@@ -959,14 +993,16 @@ function viewLaporan(){
         <div style="text-align:right;">
           <div class="max-num ${cls}">${max}</div>
           <div class="small muted">paket lagi</div>
+          ${est.max!==max ? `<div class="est-line${est.max<=0?' neg':''}">Estimasi : ${est.max}</div>` : ''}
         </div>
       </div>`;
     }
   }
 
+  const rmL = reservedMap();
   const kritis = sortedProducts()
-    .filter(p=>p.stock<=((p.criticalStock===undefined||p.criticalStock===null)?30:p.criticalStock))
-    .sort((a,b)=>a.stock-b.stock);
+    .filter(p=>{ const cr=((p.criticalStock===undefined||p.criticalStock===null)?30:p.criticalStock); return p.stock<=cr || estStockOf(p,rmL)<=cr; })
+    .sort((a,b)=>estStockOf(a,rmL)-estStockOf(b,rmL));
   html += `<div class="section-title" style="margin-top:18px;"><h2>Stok Kritis</h2></div>`;
   if(!kritis.length){
     html += `<div class="empty-state"><span class="emoji">✅</span>Aman, tidak ada stok menipis.</div>`;
@@ -975,7 +1011,7 @@ function viewLaporan(){
       <table><thead><tr><th>Produk</th><th>Sisa Stok</th><th>Batas Kritis</th></tr></thead>
       <tbody>${kritis.map(p=>{
         const crit = (p.criticalStock===undefined||p.criticalStock===null)?30:p.criticalStock;
-        return `<tr><td>${escHtml(p.name)}</td><td class="stock-num" style="color:${p.stock<=0?'var(--danger)':'var(--warn)'}">${p.stock}</td><td class="small muted">${crit}</td></tr>`;
+        return `<tr><td>${escHtml(p.name)}</td><td class="stock-num" style="color:${p.stock<=0?'var(--danger)':(p.stock<=crit?'var(--warn)':'inherit')}">${p.stock}${(rmL[p.id]||0)?`<div class="est-line${estStockOf(p,rmL)<=0?' neg':''}">Estimasi : ${estStockOf(p,rmL)}</div>`:''}</td><td class="small muted">${crit}</td></tr>`;
       }).join('')}</tbody>
       </table>
     </div>`;
@@ -1005,7 +1041,7 @@ function viewResi(){
     const validCount = resiImportPreview.filter(r=>!r.isDuplicate).length;
     html += `<div class="card">
       <h3>Pratinjau Hasil Baca (${resiImportPreview.length} baris)</h3>
-      <div class="small muted" style="margin-bottom:8px;">Hanya baris berawalan "PAKET" yang dibaca dari label. Baris bertanda 🔁 sudah ada di database (dilewati otomatis). Baris bertanda ⚠️ belum cocok ke paket manapun — pilih manual.</div>
+      <div class="small muted" style="margin-bottom:8px;">Semua nama produk di label dibaca; yang namanya cocok dengan paket di aplikasi otomatis terpasang. Baris bertanda 🔁 sudah ada di database (dilewati otomatis). Baris bertanda ⚠️ belum cocok ke paket manapun — pilih manual.</div>
       <div style="overflow-x:auto;">
       <table><thead><tr><th>Resi</th><th>Teks Asli</th><th>Cocokkan ke Paket</th><th>Qty</th></tr></thead>
       <tbody>
@@ -1252,8 +1288,9 @@ function parseResiTextBlock(rawText){
   if(tailMatch){ productText = tailMatch[1].trim(); qtyTotal = parseInt(tailMatch[2])||1; }
   else { productText = chunk; qtyTotal = 1; }
 
-  // Hanya proses baris yang namanya diawali "PAKET" — selain itu dilewati (tidak diimpor)
-  if(!/^paket\b/i.test(productText.trim())) return out;
+  // Semua nama produk dibaca (tidak harus berawalan "PAKET"). Yang namanya cocok dengan
+  // paket di aplikasi otomatis terpasang; yang tidak cocok ditandai & tidak diimpor kecuali dipilih manual.
+  if(!productText.trim()) return out;
 
   out.push(makeResiRow(resi, orderId, productText, qtyTotal));
   return out;
